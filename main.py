@@ -1,325 +1,107 @@
 from pulp import *
+import pandas as pd
+from openpyxl import load_workbook
+from openpyxl.styles import Font
 
 # =====================================
 # PODACI
 # =====================================
 
-agents = ["A1", "A2", "A3", "A4", "A5"]
-supervisors = ["S1", "S2"]
+agents = [f"A{i}" for i in range(1,11)]
+supervisors = [f"S{i}" for i in range(1,5)]
 
-days = ["Pon", "Uto", "Sri", "Cet", "Pet"]
+employees = agents + supervisors
 
-agent_shifts = ["7_15", "8_16", "10_18", "11_19"]
-supervisor_shifts = ["6_14", "14_22"]
+days = ["Ponedjeljak","Utorak","Srijeda","Četvrtak","Petak","Subota","Nedjelja"]
 
-times = [f"T{i}" for i in range(1, 33)]
-
-max_breaks_same_time = 2
-
-# =====================================
-# PRETVORBA T1-T32 U STVARNO VRIJEME
-# =====================================
-
-time_labels = {}
-
-hour = 6
-minute = 0
-
-for i in range(1, 33):
-
-    start = f"{hour:02d}:{minute:02d}"
-
-    minute += 30
-
-    if minute == 60:
-        minute = 0
-        hour += 1
-
-    end = f"{hour:02d}:{minute:02d}"
-
-    time_labels[f"T{i}"] = f"{start}-{end}"
+weekday_shifts = ["SUP_6_14","AG_7_15","AG_8_16","AG_10_18","AG_11_19","SUP_14_22"]
+weekend_shifts = ["WK_6_14","WK_14_22"]
+all_shifts = weekday_shifts + weekend_shifts
 
 # =====================================
 # MODEL
 # =====================================
 
-model = LpProblem("CallCenterScheduling", LpMinimize)
+model = LpProblem("CallCenter", LpMinimize)
 
-# =====================================
-# VARIJABLE
-# =====================================
+x = LpVariable.dicts("work",(employees,days,all_shifts),cat="Binary")
 
-x_agent = LpVariable.dicts(
-    "AgentShift",
-    (agents, days, agent_shifts),
-    cat="Binary"
-)
+# minimalni broj smjena
+model += lpSum(x[e][d][s] for e in employees for d in days for s in all_shifts)
 
-x_supervisor = LpVariable.dicts(
-    "SupervisorShift",
-    (supervisors, days, supervisor_shifts),
-    cat="Binary"
-)
+# jedna smjena dnevno
+for e in employees:
+    for d in days:
+        model += lpSum(x[e][d][s] for s in all_shifts) <= 1
 
-breaks_agent = LpVariable.dicts(
-    "AgentBreak",
-    (agents, days, times),
-    cat="Binary"
-)
+# max 5 smjena tjedno
+for e in employees:
+    model += lpSum(x[e][d][s] for d in days for s in all_shifts) <= 5
 
-breaks_supervisor = LpVariable.dicts(
-    "SupervisorBreak",
-    (supervisors, days, times),
-    cat="Binary"
-)
+# radni dani
+for d in days[:5]:
 
-# =====================================
-# FUNKCIJA CILJA
-# =====================================
+    model += lpSum(x[sv][d]["SUP_6_14"] for sv in supervisors) == 1
+    model += lpSum(x[sv][d]["SUP_14_22"] for sv in supervisors) == 1
 
-model += (
-    lpSum(
-        x_agent[a][d][s]
-        for a in agents
-        for d in days
-        for s in agent_shifts
-    )
-    +
-    lpSum(
-        x_supervisor[sv][d][s]
-        for sv in supervisors
-        for d in days
-        for s in supervisor_shifts
-    )
-)
+    model += lpSum(x[e][d]["AG_7_15"] for e in employees) == 1
+    model += lpSum(x[e][d]["AG_10_18"] for e in employees) == 1
+    model += lpSum(x[e][d]["AG_11_19"] for e in employees) == 1
+    model += lpSum(x[e][d]["AG_8_16"] for e in employees) == 7
 
-# =====================================
-# JEDNA SMJENA DNEVNO
-# =====================================
+# vikend
+for d in days[5:]:
+    model += lpSum(x[e][d]["WK_6_14"] for e in employees) == 1
+    model += lpSum(x[e][d]["WK_14_22"] for e in employees) == 1
 
+# agent ne može biti supervizor
 for a in agents:
     for d in days:
-        model += (
-            lpSum(
-                x_agent[a][d][s]
-                for s in agent_shifts
-            ) <= 1
-        )
+        model += x[a][d]["SUP_6_14"] == 0
+        model += x[a][d]["SUP_14_22"] == 0
 
-for sv in supervisors:
-    for d in days:
-        model += (
-            lpSum(
-                x_supervisor[sv][d][s]
-                for s in supervisor_shifts
-            ) <= 1
-        )
+# zabrani radne smjene vikendom i obrnuto
+for d in days[:5]:
+    model += lpSum(x[e][d]["WK_6_14"] + x[e][d]["WK_14_22"] for e in employees) == 0
 
-# =====================================
-# 40 SATI TJEDNO
-# =====================================
-
-for a in agents:
-    model += (
-        lpSum(
-            x_agent[a][d][s]
-            for d in days
-            for s in agent_shifts
-        ) == 5
-    )
-
-for sv in supervisors:
-    model += (
-        lpSum(
-            x_supervisor[sv][d][s]
-            for d in days
-            for s in supervisor_shifts
-        ) == 5
-    )
-
-# =====================================
-# MINIMALNA POPUNJENOST
-# PRIMJER
-# =====================================
-
-for d in days:
-
-    model += (
-        lpSum(
-            x_agent[a][d][s]
-            for a in agents
-            for s in agent_shifts
-        ) >= 4
-    )
-
-    model += (
-        lpSum(
-            x_supervisor[sv][d][s]
-            for sv in supervisors
-            for s in supervisor_shifts
-        ) >= 1
-    )
-
-# =====================================
-# TOČNO JEDNA PAUZA AKO RADI
-# =====================================
-
-for a in agents:
-    for d in days:
-
-        model += (
-            lpSum(
-                breaks_agent[a][d][t]
-                for t in times
-            )
-            ==
-            lpSum(
-                x_agent[a][d][s]
-                for s in agent_shifts
-            )
-        )
-
-for sv in supervisors:
-    for d in days:
-
-        model += (
-            lpSum(
-                breaks_supervisor[sv][d][t]
-                for t in times
-            )
-            ==
-            lpSum(
-                x_supervisor[sv][d][s]
-                for s in supervisor_shifts
-            )
-        )
-
-# =====================================
-# DOPUŠTENI SLOTOVI PAUZA
-# =====================================
-
-shift_slots_agent = {
-    "7_15": list(range(3, 19)),
-    "8_16": list(range(5, 21)),
-    "10_18": list(range(9, 25)),
-    "11_19": list(range(11, 27))
-}
-
-shift_slots_supervisor = {
-    "6_14": list(range(1, 17)),
-    "14_22": list(range(17, 33))
-}
-
-for a in agents:
-    for d in days:
-        for t in range(1, 33):
-
-            allowed = lpSum(
-                x_agent[a][d][s]
-                for s in agent_shifts
-                if t in shift_slots_agent[s]
-            )
-
-            model += (
-                breaks_agent[a][d][f"T{t}"]
-                <=
-                allowed
-            )
-
-for sv in supervisors:
-    for d in days:
-        for t in range(1, 33):
-
-            allowed = lpSum(
-                x_supervisor[sv][d][s]
-                for s in supervisor_shifts
-                if t in shift_slots_supervisor[s]
-            )
-
-            model += (
-                breaks_supervisor[sv][d][f"T{t}"]
-                <=
-                allowed
-            )
-
-# =====================================
-# MAX ISTOVREMENIH PAUZA
-# =====================================
-
-for d in days:
-    for t in times:
-
-        model += (
-            lpSum(
-                breaks_agent[a][d][t]
-                for a in agents
-            )
-            +
-            lpSum(
-                breaks_supervisor[sv][d][t]
-                for sv in supervisors
-            )
-            <= max_breaks_same_time
-        )
-
-# =====================================
-# SOLVE
-# =====================================
+for d in days[5:]:
+    model += lpSum(x[e][d][s] for e in employees for s in weekday_shifts) == 0
 
 model.solve(PULP_CBC_CMD(msg=True))
 
-print("\nSTATUS:", LpStatus[model.status])
+print("STATUS:", LpStatus[model.status])
 
 # =====================================
-# ISPIS SMJENA
+# EXCEL
 # =====================================
 
-print("\n===== AGENTI =====")
+rows = []
 
-for a in agents:
-    for d in days:
-        for s in agent_shifts:
+for d in days:
+    row = {"Dan": d}
 
-            if value(x_agent[a][d][s]) == 1:
+    for s in all_shifts:
+        assigned = []
+        for e in employees:
+            if value(x[e][d][s]) == 1:
+                assigned.append(e)
 
-                print(
-                    f"{a:3} | {d:3} | Smjena: {s}"
-                )
+        row[s] = ", ".join(assigned)
 
-print("\n===== SUPERVIZORI =====")
+    rows.append(row)
 
-for sv in supervisors:
-    for d in days:
-        for s in supervisor_shifts:
+df = pd.DataFrame(rows)
 
-            if value(x_supervisor[sv][d][s]) == 1:
+file_name = "Raspored_Call_Centar.xlsx"
+with pd.ExcelWriter(file_name, engine="openpyxl") as writer:
+    df.to_excel(writer, sheet_name="Raspored", index=False)
 
-                print(
-                    f"{sv:3} | {d:3} | Smjena: {s}"
-                )
+wb = load_workbook(file_name)
+ws = wb["Raspored"]
 
-# =====================================
-# ISPIS PAUZA
-# =====================================
+for cell in ws[1]:
+    cell.font = Font(bold=True)
 
-print("\n===== PAUZE =====")
+wb.save(file_name)
 
-for a in agents:
-    for d in days:
-        for t in times:
-
-            if value(breaks_agent[a][d][t]) == 1:
-
-                print(
-                    f"{a:3} | {d:3} | Pauza: {time_labels[t]}"
-                )
-
-for sv in supervisors:
-    for d in days:
-        for t in times:
-
-            if value(breaks_supervisor[sv][d][t]) == 1:
-
-                print(
-                    f"{sv:3} | {d:3} | Pauza: {time_labels[t]}"
-                )
+print("Generiran:", file_name)
