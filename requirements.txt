@@ -1,3 +1,4 @@
-#instalacija python
-# pip install pulp preko terminala
-#run
+-- install python
+-- install pulp
+-- import pandas
+-- run file
